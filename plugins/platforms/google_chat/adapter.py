@@ -58,6 +58,7 @@ _GOOGLE_IMPORTS = (
 _GOOGLE_ID_TOKEN_CERTS_TTL_SECONDS = 300
 _google_id_token_request: Any = None
 _google_id_token_request_lock = threading.Lock()
+_GoogleAuthRequest = None
 
 
 class _CachedGoogleAuthRequest:
@@ -136,7 +137,6 @@ from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
 
 # Pinned to the legacy module path so operator log filters keep matching.
 logger = logging.getLogger("gateway.platforms.google_chat")
-
 _SUBSCRIPTION_PATH_RE = re.compile(r"^projects/(?P<project>[^/]+)/subscriptions/(?P<sub>[^/]+)$")
 # chat.bot covers the bot's own messaging ops; it CANNOT call media.upload
 # (user OAuth required — see ``oauth.py``).
@@ -353,22 +353,34 @@ _SA_ERROR_MESSAGES = {
                    "GOOGLE_CHAT_SERVICE_ACCOUNT_JSON or run ``gcloud auth application-default login``. ADC error: {exc}"),
 }
 
+_THREAD_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_REPLY_MESSAGE_FALLBACK = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
 
-def _thread_body(text: str, thread_id: Optional[str]) -> Dict[str, Any]:
-    """``{"text": ...}`` plus ``thread.name`` when replying into a thread."""
+
+def _thread_body(text: str, thread_id: Optional[str], thread_key: Optional[str] = None) -> Dict[str, Any]:
+    """``{"text": ...}`` plus the destination thread for REST sends.
+
+    ``thread.name`` replies to an existing Google Chat thread resource. ``threadKey`` is
+    a caller-stable identity: the first send creates that thread and later sends join it
+    when ``messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD`` is also sent. The
+    two addressing modes cannot be combined; the cron contract keys a logical thread by
+    one or the other, never both.
+    """
     body: Dict[str, Any] = {"text": text}
-    if thread_id:
+    if thread_key:
+        body["thread"] = {"threadKey": thread_key}
+    elif thread_id:
         body["thread"] = {"name": thread_id}
     return body
 
 
 def _create_kwargs(chat_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
-    """messages.create kwargs. With ``thread.name`` we MUST pass
+    """messages.create kwargs. With ``thread.name`` or ``threadKey`` we MUST pass
     ``messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD`` — the default silently
-    ignores thread.name; FALLBACK (vs OR_FAIL) still delivers when the thread is gone."""
+    ignores both; FALLBACK (vs OR_FAIL) still delivers when the thread is gone."""
     kwargs: Dict[str, Any] = {"parent": chat_id, "body": body}
-    if (body.get("thread") or {}).get("name"):
-        kwargs["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+    if (body.get("thread") or {}).get("name") or (body.get("thread") or {}).get("threadKey"):
+        kwargs["messageReplyOption"] = _REPLY_MESSAGE_FALLBACK
     return kwargs
 
 
@@ -1719,15 +1731,23 @@ def _standalone_error(detail: str) -> Dict[str, Any]:
 async def _standalone_send(
     pconfig, chat_id: str, message: str, *, thread_id: Optional[str] = None,
     media_files: Optional[List[str]] = None, force_document: bool = False,
+    thread_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """POST one Chat message via REST without the SDK (``send_message_tool`` when the
     gateway runner is not in-process, e.g. ``hermes cron``). Needs SA credentials and a
-    validated space name; ``media_files`` / ``force_document`` are signature parity only."""
+    validated space name; ``media_files`` / ``force_document`` are signature parity only.
+    ``thread_key`` bypasses any live in-process adapter in send_message_tool because the
+    adapter ``send()`` path cannot send ``threadKey`` and would silently start a new thread."""
     if not chat_id:
         return _standalone_error("chat_id (space resource) is required")
     if not _GCHAT_CHAT_ID_RE.match(chat_id):
         return _standalone_error(
             f"chat_id {chat_id!r} must match 'spaces/<id>' or 'users/<id>' with only [A-Za-z0-9_-] in the id")
+    if thread_key is not None and (not isinstance(thread_key, str)
+                                   or not _THREAD_KEY_RE.fullmatch(thread_key)):
+        return _standalone_error("thread_key must match [A-Za-z0-9_-]{1,64}")
+    if thread_id and thread_key:
+        return _standalone_error("thread_id and thread_key are mutually exclusive")
     if thread_id is not None and not _GCHAT_THREAD_ID_RE.match(thread_id):
         return _standalone_error(f"thread_id {thread_id!r} must match 'spaces/<id>/threads/<id>'")
     extra = getattr(pconfig, "extra", {}) or {}
@@ -1737,10 +1757,12 @@ async def _standalone_send(
     )
     if service_account is None:
         return _standalone_error("google-auth not installed")
-    try:
-        from google.auth.transport.requests import Request as _GoogleAuthRequest
-    except Exception as e:
-        return _standalone_error(f"google-auth import failed: {e}")
+    global _GoogleAuthRequest
+    if _GoogleAuthRequest is None:
+        try:
+            from google.auth.transport.requests import Request as _GoogleAuthRequest
+        except Exception as e:
+            return _standalone_error(f"google-auth import failed: {e}")
     try:
         creds = _load_sa_credentials_from(sa_value)
     except _SACredentialError as err:
@@ -1758,19 +1780,24 @@ async def _standalone_send(
     if not token:
         return _standalone_error("refreshed credentials have no token")
     try:
-        import aiohttp as _aiohttp
-    except ImportError:
-        return _standalone_error("aiohttp not installed")
-    try:
-        async with _aiohttp.ClientSession(timeout=_aiohttp.ClientTimeout(total=30.0), trust_env=gateway_trust_env()) as session:
+        import aiohttp
+
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30.0),
+                                          trust_env=gateway_trust_env()) as session:
             async with session.post(
-                f"https://chat.googleapis.com/v1/{chat_id}/messages", json=_thread_body(message, thread_id),
+                f"https://chat.googleapis.com/v1/{chat_id}/messages",
+                json=_thread_body(message, thread_id, thread_key),
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                params={"messageReplyOption": _REPLY_MESSAGE_FALLBACK} if (thread_id or thread_key) else None,
             ) as resp:
                 if resp.status >= 400:
                     return _standalone_error(f"API returned {resp.status}: {(await resp.text())[:300]}")
                 payload = await resp.json()
-        return {"success": True, "message_id": payload.get("name")}
+        result: Dict[str, Any] = {"success": True, "message_id": payload.get("name"),
+                                  "thread_id": (payload.get("thread") or {}).get("name")}
+        if thread_key:
+            result["thread_key_used"] = thread_key
+        return result
     except Exception as e:
         logger.debug("Google Chat standalone send raised", exc_info=True)
         return send_error(f"Google Chat standalone send failed: {e}")

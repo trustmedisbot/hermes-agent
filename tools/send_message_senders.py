@@ -352,10 +352,15 @@ def _plugin_standalone_sender(platform_name, *, label=None, discover=True):
     return entry.standalone_sender_fn, None
 
 
-async def _registry_standalone_send(platform_name, pconfig, chat_id, message, thread_id=None):
+async def _registry_standalone_send(platform_name, pconfig, chat_id, message, thread_id=None,
+                                    thread_key=None):
     """One-shot text send through a plugin's ``standalone_sender_fn``."""
     sender, err = _plugin_standalone_sender(platform_name)
-    return err or await sender(pconfig, chat_id, message, thread_id=thread_id)
+    if err:
+        return err
+    if platform_name == "google_chat":
+        return await sender(pconfig, chat_id, message, thread_id=thread_id, thread_key=thread_key)
+    return await sender(pconfig, chat_id, message, thread_id=thread_id)
 
 
 async def _resolve_slack_user_target(token, chat_id):

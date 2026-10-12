@@ -771,6 +771,7 @@ class TestSend:
     @pytest.mark.asyncio
     async def test_with_typing_card_patches_instead_of_creating(self, adapter):
         adapter._typing_messages["spaces/S"] = "spaces/S/messages/THINK"
+        adapter._typing_card_threads["spaces/S"] = "spaces/S/threads/T"
         adapter._patch_message = AsyncMock(
             return_value=type("R", (), {"success": True,
                                         "message_id": "spaces/S/messages/THINK",
@@ -961,6 +962,7 @@ class TestTypingLifecycle:
         """CANCELLED path: send() never ran. Patch the typing card with a
         benign final state instead of deleting (no tombstone)."""
         adapter._typing_messages["spaces/S"] = "spaces/S/messages/THINK"
+        adapter._typing_card_threads["spaces/S"] = "spaces/S/threads/T"
         adapter._patch_message = AsyncMock(
             return_value=type("R", (), {"success": True,
                                         "message_id": "spaces/S/messages/THINK",
@@ -969,6 +971,7 @@ class TestTypingLifecycle:
         event = MagicMock()
         event.source = MagicMock()
         event.source.chat_id = "spaces/S"
+        event.source.thread_id = "spaces/S/threads/T"
         await adapter.on_processing_complete(event, ProcessingOutcome.CANCELLED)
         adapter._patch_message.assert_awaited_once()
         # Patched with a final-state label, not deleted.
@@ -1753,6 +1756,7 @@ class TestGoogleChatStandaloneSend:
         assert result == {
             "success": True,
             "message_id": "spaces/AAA/messages/MMM",
+            "thread_id": None,
         }
         fake_creds.refresh.assert_called_once()
         assert len(session.calls) == 1
@@ -1760,4 +1764,3 @@ class TestGoogleChatStandaloneSend:
         assert url == "https://chat.googleapis.com/v1/spaces/AAAA-BBBB/messages"
         assert kwargs["headers"]["Authorization"] == "Bearer the-token"
         assert kwargs["json"] == {"text": "hello cron"}
-

@@ -25,6 +25,24 @@ _INTERPRETER_PREFIXES = tuple({
     # trips on its first traceback.
     Path(__file__).resolve().parent.parent,
 })
+
+
+def _git_dir_for_checkout(root: Path) -> Path:
+    """A checkout's git dir, including a linked worktree's separate ``.git`` directory."""
+    dot_git = root / ".git"
+    if dot_git.is_file():
+        text = dot_git.read_text(encoding="utf-8-sig").strip()
+        if text.startswith("gitdir:"):
+            return root / text[len("gitdir:"):].strip()
+    return dot_git
+
+
+_CHECKOUT_ROOT = Path(__file__).resolve().parent.parent
+_INTERPRETER_PREFIXES = (*_INTERPRETER_PREFIXES, _git_dir_for_checkout(_CHECKOUT_ROOT))
+# A linked worktree can live beside its parent install. PM's boot payload probe
+# reads one manifest beside the tree; that is interpreter bootstrap, not Hermes state.
+_PM_PAYLOAD_MANIFEST = _CHECKOUT_ROOT.parent / "manifest.json"
+_INTERPRETER_PREFIXES = (*_INTERPRETER_PREFIXES, _PM_PAYLOAD_MANIFEST)
 # The same prefixes as plain strings for the check() fast path. PurePath comparison folds case on
 # Windows; ``os.path.normcase`` (identity on POSIX) reproduces that for string compares. Prefixes
 # resolve once at import, as before: they are fixed for the process lifetime.

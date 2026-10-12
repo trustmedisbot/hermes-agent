@@ -162,7 +162,6 @@ def test_whatsapp_mentions_ride_the_first_bridge_payload_only(whatsapp_bridge, t
     assert exc.value.code == 0
     assert [path for path, _ in calls] == ["send-media"]
     assert calls[0][1]["mentions"] == ["15550000001@s.whatsapp.net"]
-
     calls.clear()
     whatsapp_bridge.state["supports_mentions"] = False
     with pytest.raises(SystemExit) as exc:
@@ -170,6 +169,37 @@ def test_whatsapp_mentions_ride_the_first_bridge_payload_only(whatsapp_bridge, t
     assert exc.value.code == 1
     assert "does not support native mentions" in capsys.readouterr().err
     assert calls == []
+
+
+def test_google_chat_thread_key_is_passed_to_send_tool(fake_tool, monkeypatch):
+    monkeypatch.setattr(send_cmd, "_load_hermes_env", lambda: None)
+    args = _parse(["--to", "google_chat:spaces/space", "--thread-key", "kvk-zabbix-2026-10-12", "hello"])
+
+    with pytest.raises(SystemExit) as exc:
+        send_cmd.cmd_send(args)
+
+    assert exc.value.code == 0
+    assert fake_tool.calls == [{
+        "action": "send",
+        "target": "google_chat:spaces/space",
+        "message": "hello",
+        "thread_key": "kvk-zabbix-2026-10-12",
+    }]
+
+
+def test_google_chat_thread_key_rejects_embedded_thread(fake_tool, monkeypatch, capsys):
+    monkeypatch.setattr(send_cmd, "_load_hermes_env", lambda: None)
+    args = _parse([
+        "--to", "google_chat:spaces/space:spaces/space/threads/thread",
+        "--thread-key", "daily-key", "hello",
+    ])
+
+    with pytest.raises(SystemExit) as exc:
+        send_cmd.cmd_send(args)
+
+    assert exc.value.code == 2
+    assert "cannot be combined" in capsys.readouterr().err
+    assert fake_tool.calls == []
 
 # ---------------------------------------------------------------------------
 # --list

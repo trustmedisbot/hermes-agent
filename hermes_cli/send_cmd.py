@@ -236,6 +236,13 @@ def cmd_send(args: argparse.Namespace) -> None:
     tool_args = {"action": "send", "target": target, "message": message}
     if mentions:
         tool_args["mentions"] = mentions
+    thread_key = getattr(args, "thread_key", None)
+    if thread_key:
+        if target.split(":", 1)[0].strip().lower() != "google_chat":
+            _fail("hermes send: --thread-key is only supported for Google Chat targets.", _USAGE_EXIT)
+        if target.count(":") > 1:
+            _fail("hermes send: --thread-key cannot be combined with a thread in the target.", _USAGE_EXIT)
+        tool_args["thread_key"] = thread_key
     result = send_message_tool(tool_args)
     sys.exit(_emit_result(result, json_mode=getattr(args, "json", False), quiet=getattr(args, "quiet", False)))
 
@@ -252,6 +259,10 @@ _SEND_ARGUMENTS = (
         "Read message body from PATH (text only). Use '-' to force stdin. "
         "To send an image/document as an attachment, use MEDIA:<path> in the message text instead."))),
     (("-s", "--subject"), dict(metavar="LINE", default=None, help="Prepend a subject/header line before the message body.")),
+    (("--thread-key",), dict(metavar="KEY", default=None, help=(
+        "Google Chat only: group sends under a stable threadKey — first send creates the thread, "
+        "later sends reply into it (needs messageReplyOption, handled automatically). "
+        "Use one key per logical daily thread."))),
     (("--mention",), dict(dest="mentions", action="append", default=None, metavar="PHONE_OR_JID", help=(
         "WhatsApp only: add a native participant mention. Repeat for multiple recipients; "
         "bare phone numbers are normalized to JIDs. Include each matching @<number> near the start of the message text."))),

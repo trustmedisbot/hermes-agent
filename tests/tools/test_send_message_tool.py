@@ -312,6 +312,7 @@ class TestSendMessageTool:
             "alerts-channel",
             "done",
             thread_id=None,
+            thread_key=None,
             media_files=[],
             force_document=False,
         )
@@ -354,6 +355,7 @@ class TestSendMessageTool:
             "12345",
             "hello",
             thread_id=None,
+            thread_key=None,
             media_files=[],
             force_document=False,
         )
@@ -388,7 +390,7 @@ class TestSendMessageTool:
         assert result["error"]
         send_mock.assert_awaited_once_with(
             Platform.TELEGRAM, telegram_cfg, "12345", "report", thread_id=None,
-            media_files=[(str(report.resolve()), False)], force_document=False,
+            thread_key=None, media_files=[(str(report.resolve()), False)], force_document=False,
         )
         assert _emit_result(raw, json_mode=True, quiet=True) != 0
 
@@ -1569,6 +1571,78 @@ class TestSendViaAdapterStandaloneFallback:
 
         assert set(result) == {"error"}
         assert "boom!" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_google_chat_thread_key_bypasses_live_adapter(self, monkeypatch):
+        from tools.send_message_tool import _send_via_adapter
+
+        live_calls = []
+        standalone_calls = []
+
+        class Adapter:
+            async def send(self, **kwargs):
+                live_calls.append(kwargs)
+                return SimpleNamespace(success=True, message_id="live-id")
+
+        async def sender(pconfig, chat_id, message, **kwargs):
+            standalone_calls.append((chat_id, message, kwargs))
+            return {"success": True, "message_id": "standalone-id"}
+
+        from gateway.platform_registry import PlatformEntry, platform_registry
+
+        platform_registry.register(PlatformEntry(
+            name="fakeplatform",
+            label="Fake",
+            adapter_factory=lambda cfg: None,
+            check_fn=lambda: True,
+            standalone_sender_fn=sender,
+        ))
+        runner = SimpleNamespace(adapters={_FakePlatform("fakeplatform"): Adapter()})
+        fake_gateway_run = ModuleType("gateway.run")
+        fake_gateway_run._gateway_runner_ref = lambda: runner
+        monkeypatch.setitem(sys.modules, "gateway.run", fake_gateway_run)
+
+        try:
+            result = await _send_via_adapter(
+                _FakePlatform("fakeplatform"),
+                SimpleNamespace(extra={}),
+                "spaces/space",
+                "hello",
+                thread_key="daily-key",
+            )
+        finally:
+            platform_registry.unregister("fakeplatform")
+
+        assert result["success"] is True
+        assert live_calls == []
+        assert standalone_calls == [
+            ("spaces/space", "hello", {"thread_id": None, "thread_key": "daily-key",
+                                       "media_files": None, "force_document": False})
+        ]
+
+
+@pytest.mark.asyncio
+async def test_non_google_standalone_sender_ignores_thread_key(monkeypatch):
+    """``thread_key`` never leaks into another platform's standalone sender."""
+    from tools.send_message_senders import _registry_standalone_send
+    from tools import send_message_senders
+
+    calls = []
+
+    async def sender(pconfig, chat_id, message, thread_id=None):
+        calls.append((chat_id, message, thread_id))
+        return {"success": True, "message_id": "other-id"}
+
+    monkeypatch.setattr(
+        send_message_senders, "_plugin_standalone_sender",
+        lambda platform_name, **kwargs: (sender, None),
+    )
+
+    result = await _registry_standalone_send(
+        "whatsapp", SimpleNamespace(extra={}), "chat-1", "hello", thread_key="daily-key")
+
+    assert result["success"] is True
+    assert calls == [("chat-1", "hello", None)]
 
 class TestSendTelegramThreadNotFoundRetry:
     """Tests for thread-not-found retry behaviour in _send_telegram (#27012)."""
