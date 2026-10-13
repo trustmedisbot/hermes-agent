@@ -1755,8 +1755,14 @@ async def _standalone_send(
         extra.get("service_account_json") or _get_scoped_secret("GOOGLE_CHAT_SERVICE_ACCOUNT_JSON")
         or _get_scoped_secret("GOOGLE_APPLICATION_CREDENTIALS")
     )
+    global service_account
     if service_account is None:
-        return _standalone_error("google-auth not installed")
+        # The standalone path needs only google-auth (SA credentials); don't require
+        # the full gateway stack (pubsub / gapic client) to be importable.
+        try:
+            service_account = importlib.import_module("google.oauth2.service_account")
+        except ImportError:
+            return _standalone_error("google-auth not installed")
     global _GoogleAuthRequest
     if _GoogleAuthRequest is None:
         try:
@@ -1803,6 +1809,27 @@ async def _standalone_send(
         return send_error(f"Google Chat standalone send failed: {e}")
 
 
+def _parse_gchat_target_ref(target_ref: str):
+    """Native target parser: ``spaces/<id>`` / ``users/<id>`` (optionally
+    ``:spaces/<id>/threads/<id>``). Returns ``(chat_id, thread_id)`` or ``None``."""
+    if not isinstance(target_ref, str):
+        return None
+    chat_id, _, thread_part = target_ref.partition(":")
+    if not _GCHAT_CHAT_ID_RE.fullmatch(chat_id.strip()):
+        return None
+    thread_id = thread_part.strip() or None
+    if thread_id is not None and not _GCHAT_THREAD_ID_RE.fullmatch(thread_id):
+        return None
+    return chat_id.strip(), thread_id
+
+
+def _validate_gchat_target_ref(chat_id) -> bool | str:
+    """Strict validator used by ``resolve_send_target`` before handing an id to the adapter."""
+    if isinstance(chat_id, str) and _GCHAT_CHAT_ID_RE.fullmatch(chat_id.strip()):
+        return True
+    return "chat_id must match 'spaces/<id>' or 'users/<id>'"
+
+
 def register(ctx) -> None:
     """Plugin entry point: registers the ``google_chat`` adapter with the platform registry."""
     ctx.register_platform(
@@ -1821,6 +1848,8 @@ def register(ctx) -> None:
         standalone_sender_fn=_standalone_send,
         allowed_users_env="GOOGLE_CHAT_ALLOWED_USERS",
         allow_all_env="GOOGLE_CHAT_ALLOW_ALL_USERS",
+        parse_target_ref_fn=_parse_gchat_target_ref,
+        validate_target_ref_fn=_validate_gchat_target_ref,
         # Chat caps text at 4096; margin for typing-marker patches and edit overhead.
         max_message_length=4000,
         emoji="💬",

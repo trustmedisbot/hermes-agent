@@ -298,6 +298,7 @@ def test_send_message_routes_buzz_uuid_without_home_fallback() -> None:
         channel_id,
         "hello group",
         thread_id=None,
+        thread_key=None,
         media_files=[],
         force_document=False,
     )
@@ -346,6 +347,7 @@ def test_send_message_routes_whatsapp_group_jid_without_home_fallback() -> None:
         "120363408391911677@g.us",
         "hello group",
         thread_id=None,
+        thread_key=None,
         media_files=[],
         force_document=False,
     )
@@ -400,6 +402,7 @@ def test_resolved_opaque_plugin_target_uses_directory_id() -> None:
         "opaque:directory-id",
         "hello",
         thread_id=None,
+        thread_key=None,
         media_files=[],
         force_document=False,
     )
@@ -597,3 +600,21 @@ def test_unknown_platform_that_left_core_names_its_install_command(tmp_path, mon
     assert "`hermes plugins install homeassistant`" in err
     _, _, _, err = _resolve_platform_config("nosuchplatform", GatewayConfig())
     assert err == "Unknown or unregistered plugin platform: nosuchplatform"
+
+
+def test_google_chat_native_space_target_parses():
+    """google_chat native refs (spaces/<id>, users/<id>, with optional thread) parse strictly."""
+    from plugins.platforms.google_chat.adapter import (
+        _parse_gchat_target_ref,
+        _validate_gchat_target_ref,
+    )
+    assert _parse_gchat_target_ref("spaces/3qbMsqAAAAE") == ("spaces/3qbMsqAAAAE", None)
+    assert _parse_gchat_target_ref("users/12345") == ("users/12345", None)
+    assert _parse_gchat_target_ref(
+        "spaces/3qbMsqAAAAE:spaces/3qbMsqAAAAE/threads/abcDEF-1"
+    ) == ("spaces/3qbMsqAAAAE", "spaces/3qbMsqAAAAE/threads/abcDEF-1")
+    assert _parse_gchat_target_ref("general chat") is None
+    assert _parse_gchat_target_ref("spaces/3qbM sq") is None
+    assert _parse_gchat_target_ref("spaces/abc:bad-thread") is None
+    assert _validate_gchat_target_ref("spaces/3qbMsqAAAAE") is True
+    assert isinstance(_validate_gchat_target_ref("nope"), str)
