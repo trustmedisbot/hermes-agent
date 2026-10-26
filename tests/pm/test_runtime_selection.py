@@ -5,6 +5,84 @@ from pathlib import Path
 import pytest
 
 
+def _committed_generation(root):
+    from pm import environments as runtime_paths
+
+    state = runtime_paths.install_state_dir(root)
+    generation = state / "environments" / "committed" / "venv"
+    generation.mkdir(parents=True)
+    (generation / "pyvenv.cfg").write_text("home = test")
+    (state / "facts.json").write_text(json.dumps({
+        "schema": 1, "packages": {"venv": {"environment": str(generation)}},
+    }))
+    return generation
+
+
+def _worktree_of(owner, name="task"):
+    """A hand-written linked-worktree layout: no real git repo or binary needed."""
+    (owner / ".git" / "worktrees" / name).mkdir(parents=True)
+    worktree = owner / "wt" / name
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {owner / '.git' / 'worktrees' / name}\n")
+    return worktree
+
+
+def test_git_worktree_borrows_the_owning_checkouts_environment(tmp_path, monkeypatch):
+    from pm import environments as runtime_paths
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    owner = tmp_path / "checkout"
+    owner.mkdir()
+    generation = _committed_generation(owner)
+    worktree = _worktree_of(owner)
+    assert not runtime_paths.install_state_dir(worktree).exists()
+    assert runtime_paths.owning_checkout_root(worktree) == owner
+    assert runtime_paths.committed_venv(worktree) == generation
+
+
+def test_own_state_wins_over_the_owner(tmp_path, monkeypatch):
+    from pm import environments as runtime_paths
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    owner = tmp_path / "checkout"
+    owner.mkdir()
+    _committed_generation(owner)
+    worktree = _worktree_of(owner)
+    own_generation = _committed_generation(worktree)
+    assert runtime_paths.owning_checkout_root(worktree) == owner
+    assert runtime_paths.committed_venv(worktree) == own_generation
+
+
+@pytest.mark.parametrize("marker,commit_owner", [
+    ("directory", True),
+    ("no-gitdir", True),
+    ("outside-worktrees", True),
+    ("standard", False),
+])
+def test_no_borrow_without_a_linked_worktree_layout(tmp_path, monkeypatch, marker, commit_owner):
+    from pm import environments as runtime_paths
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    owner = tmp_path / "checkout"
+    owner.mkdir()
+    if commit_owner:
+        _committed_generation(owner)
+    worktree = owner / "wt" / "task"
+    worktree.mkdir(parents=True)
+    git_file = worktree / ".git"
+    if marker == "directory":
+        git_file.mkdir()
+    elif marker == "no-gitdir":
+        git_file.write_text("something else\n")
+    elif marker == "outside-worktrees":
+        git_file.write_text(f"gitdir: {tmp_path / 'elsewhere.git'}\n")
+    else:
+        (owner / ".git" / "worktrees" / "task").mkdir(parents=True)
+        git_file.write_text(f"gitdir: {owner / '.git' / 'worktrees' / 'task'}\n")
+    assert runtime_paths.owning_checkout_root(worktree) is None
+    assert runtime_paths.committed_venv(worktree) is None
+
+
 def test_install_runtime_selection_is_scoped_and_read_only(tmp_path, monkeypatch):
     from pm import environments as runtime_paths
 
