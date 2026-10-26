@@ -72,6 +72,60 @@ def owning_home_root(project_root: Path) -> Path | None:
     return owner
 
 
+def _worktree_owner(project_root: Path) -> Path | None:
+    """The checkout that holds *project_root* as one of its linked git worktrees, else ``None``.
+
+    A linked worktree's ``.git`` is a one-line ``gitdir: <path>`` file pointing at
+    ``<owner>/.git/worktrees/<name>``; only that standard layout counts, so an
+    ordinary checkout (``.git`` is a directory) never reads as a worktree of
+    itself. Any odd marker or unreadable file means "not a worktree", never an
+    error: this runs at process boot, where no third-party code is importable
+    and ``git`` may not exist at all.
+    """
+    root = Path(project_root).resolve()
+    marker = root / ".git"
+    try:
+        if not marker.is_file():
+            return None
+        first = marker.read_text(encoding="utf-8-sig").splitlines()[0].strip()
+    except (OSError, IndexError):
+        return None
+    if not first.startswith("gitdir:"):
+        return None
+    gitdir = first[len("gitdir:"):].strip()
+    if not gitdir:
+        return None
+    gitdir = Path(gitdir)
+    if not gitdir.is_absolute():
+        gitdir = root / gitdir
+    try:
+        gitdir = gitdir.resolve()
+    except OSError:
+        return None
+    if gitdir.parent.name != "worktrees":
+        return None
+    owner = gitdir.parent.parent.parent
+    if owner == root or not (owner / ".git").exists():
+        return None
+    return owner
+
+
+def owning_checkout_root(project_root: Path) -> Path | None:
+    """The checkout that owns this tree when *project_root* is one of its git worktrees, else ``None``.
+
+    Dependency state is keyed by the tree's own path, but a git worktree of an
+    installed checkout has no dependency state of its own: the install that owns
+    it committed its environment under the checkout's key. As with
+    ``owning_home_root``, only an owner that actually has a committed
+    environment counts -- anything else keeps today's behaviour. ``None`` for a
+    plain checkout, an odd worktree marker, or an owner with no committed
+    environment, so an install/update running in the worktree still builds its
+    own state instead of silently adopting the owner's.
+    """
+    owner = _worktree_owner(project_root)
+    return owner if owner and (_recorded_venv(owner) or payload_venv(owner)) else None
+
+
 def _launcher_bound_root(project_root: Path, candidates: list[Path]) -> Path | None:
     """The candidate whose ``tools/`` holds the live interpreter the checkout's launcher execs."""
     from hermes_cli._launchers import _launcher_python
@@ -291,7 +345,17 @@ def committed_venv(project_root: Path) -> Path | None:
     predates PM and is built for whichever interpreter created it, so loading it from PM's store
     Python mixes ABIs (compiled modules vanish) and PM deletes it once a generation is committed.
     """
-    return _recorded_venv(project_root) or payload_venv(project_root)
+    return _recorded_venv(project_root) or payload_venv(project_root) or _worktree_owner_venv(project_root)
+
+
+def _worktree_owner_venv(project_root: Path) -> Path | None:
+    """A git worktree borrows the owning checkout's committed environment.
+
+    Read through ``owning_checkout_root`` so the owner's record is validated
+    against the owner's install directories, never the worktree's.
+    """
+    owner = owning_checkout_root(project_root)
+    return _recorded_venv(owner) or payload_venv(owner) if owner else None
 
 
 def _recorded_venv(project_root: Path) -> Path | None:
@@ -478,7 +542,9 @@ def activate_dependencies(project_root: Path) -> None:
     else:
         # Sealed payloads still select once, before imports.
         # Never consult VIRTUAL_ENV: it can describe the invoking shell's Python.
-        environment = payload_venv(project_root)
+        # A git worktree of an installed checkout reads here too: with no state
+        # of its own, committed_venv borrows the owning checkout's environment.
+        environment = committed_venv(project_root)
         if environment is None:
             return _require_own_dependencies(project_root)
         selected = site_packages(environment)
